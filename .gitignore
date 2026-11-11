@@ -1,0 +1,3 @@
+build/
+install/
+*.sqlite3*

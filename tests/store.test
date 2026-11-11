@@ -1,0 +1,119 @@
+package require tcltest 2
+namespace import ::tcltest::*
+package require tsession-sqlite 1.0.0
+namespace eval ::storetest {variable serial 0}
+testConstraint backend 1
+proc ::storetest::connect {} {
+    return [::tpersist::db_connect -dialect sqlite -database $::storetest::filename -autobegin 0]
+}
+proc ::storetest::setup {} {
+    variable db
+    variable a
+    variable b
+    variable serial
+    variable tenant
+    variable filename
+    set filename [::tcltest::makeFile {} sessions-[pid].sqlite3]
+    set db [connect]
+    ::tsession::sqlite::initdb $db
+    ::tsession::sqlite::initdb $db
+    set tenant test-[pid]-[incr serial]
+    set a [::tsession::sqlite::create -connection $db -tenant $tenant-a]
+    set b [::tsession::sqlite::create -connection $db -tenant $tenant-b]
+}
+proc ::storetest::cleanup {} {
+    variable db
+    foreach store [list $::storetest::a $::storetest::b] {
+        ::tpersist::db_execute $db [::tpersist::db_where [::tpersist::db_delete tsession_sessions] \
+            [::tsession::sql::predicate $store]]
+    }
+    ::tpersist::db_disconnect $db
+    ::tcltest::removeFile $::storetest::filename
+}
+proc ::storetest::data {} {dict create expires [expr {[clock seconds]+3600}] note {Zoë 世界 [error never-evaluate]; $variable} nested {a {b c}}}
+
+test store-1 {dictionary round trip, opaque identifiers and tenant isolation} -constraints backend -setup {::storetest::setup} -body {
+    set id {id'; DROP TABLE tsession_sessions; --}
+    set data [::storetest::data]
+    ::tsession::sql::insert $::storetest::a $id $data user
+    ::tsession::sql::insert $::storetest::b $id [dict replace $data note other] user
+    set a [::tsession::sql::get $::storetest::a $id]
+    list [expr {$a eq [dict replace $data id $id]}] [dict get [::tsession::sql::get $::storetest::b $id] note] \
+        [::tsession::sql::get $::storetest::a missing]
+} -cleanup {::storetest::cleanup} -result {1 other {}}
+
+test store-2 {insertion cannot replace an existing session} -constraints backend -setup {::storetest::setup} -body {
+    ::tsession::sql::insert $::storetest::a id [::storetest::data]
+    set failed [catch {::tsession::sql::insert $::storetest::a id [dict replace [::storetest::data] note overwritten]}]
+    list $failed [dict get [::tsession::sql::get $::storetest::a id] note]
+} -cleanup {::storetest::cleanup} -result {1 {Zoë 世界 [error never-evaluate]; $variable}}
+
+test store-3 {absolute expiry and updates never resurrect expired or deleted sessions} -constraints backend -setup {::storetest::setup} -body {
+    ::tsession::sql::insert $::storetest::a expired [dict create expires [clock seconds]]
+    ::tsession::sql::insert $::storetest::a live [::storetest::data]
+    set result [list [::tsession::sql::get $::storetest::a expired] \
+        [::tsession::sql::update $::storetest::a expired [::storetest::data]] \
+        [::tsession::sql::update $::storetest::a live {note changed}]]
+    lappend result [dict get [::tsession::sql::get $::storetest::a live] note] \
+        [::tsession::sql::delete $::storetest::a live] [::tsession::sql::delete $::storetest::a live] \
+        [::tsession::sql::update $::storetest::a live [::storetest::data]]
+    set result
+} -cleanup {::storetest::cleanup} -result {{} 0 1 changed 1 0 0}
+
+test store-4 {revocation targets a subject within its tenant} -constraints backend -setup {::storetest::setup} -body {
+    foreach id {one two} {::tsession::sql::insert $::storetest::a $id [::storetest::data] alice}
+    ::tsession::sql::insert $::storetest::a three [::storetest::data] bob
+    ::tsession::sql::insert $::storetest::b one [::storetest::data] alice
+    list [::tsession::sql::revoke $::storetest::a alice] \
+        [expr {[::tsession::sql::get $::storetest::a one] eq {}}] \
+        [expr {[::tsession::sql::get $::storetest::a three] ne {}}] \
+        [expr {[::tsession::sql::get $::storetest::b one] ne {}}]
+} -cleanup {::storetest::cleanup} -result {2 1 1 1}
+
+test store-5 {pruning only deletes expired rows within its tenant} -constraints backend -setup {::storetest::setup} -body {
+    foreach store [list $::storetest::a $::storetest::b] {
+        ::tsession::sql::insert $store old {expires 0}
+        ::tsession::sql::insert $store live [::storetest::data]
+    }
+    list [::tsession::sql::prune $::storetest::a] [::tsession::sql::prune $::storetest::a] \
+        [::tsession::sql::prune $::storetest::b] [expr {[::tsession::sql::get $::storetest::a live] ne {}}]
+} -cleanup {::storetest::cleanup} -result {1 0 1 1}
+
+test store-6 {session writes and revocation roll back with the borrowed transaction} -constraints backend -setup {::storetest::setup} -body {
+    ::tsession::sql::insert $::storetest::a id [::storetest::data] alice
+    set failed [catch {::tpersist::db_transaction $::storetest::db {
+        ::tsession::sql::update $::storetest::a id {note changed}
+        ::tsession::sql::revoke $::storetest::a alice
+        ::tsession::sql::insert $::storetest::a replacement [::storetest::data] alice
+        error rollback
+    }}]
+    list $failed [dict get [::tsession::sql::get $::storetest::a id] note] \
+        [::tsession::sql::get $::storetest::a replacement]
+} -cleanup {::storetest::cleanup} -result {1 {Zoë 世界 [error never-evaluate]; $variable} {}}
+
+test store-7 {reopening a database preserves committed sessions} -constraints backend -setup {::storetest::setup} -body {
+    ::tsession::sql::insert $::storetest::a id [::storetest::data]
+    ::tpersist::db_disconnect $::storetest::db
+    set ::storetest::db [::storetest::connect]
+    foreach name {a b} {dict set ::storetest::$name connection $::storetest::db}
+    dict get [::tsession::sql::get $::storetest::a id] note
+} -cleanup {::storetest::cleanup} -result {Zoë 世界 [error never-evaluate]; $variable}
+
+test store-8 {empty ids, invalid expiry, and changing ids are rejected} -constraints backend -setup {::storetest::setup} -body {
+    ::tsession::sql::insert $::storetest::a id [::storetest::data]
+    list [catch {::tsession::sql::get $::storetest::a {}}] \
+        [catch {::tsession::sql::delete $::storetest::a {}}] \
+        [catch {::tsession::sql::insert $::storetest::a {} [::storetest::data]}] \
+        [catch {::tsession::sql::insert $::storetest::a bad {expires never}}] \
+        [catch {::tsession::sql::update $::storetest::a id {id another}}] \
+        [catch {::tsession::sql::revoke $::storetest::a {}}] \
+        [expr {[::tsession::sql::get $::storetest::a id] ne {}}]
+} -cleanup {::storetest::cleanup} -result {1 1 1 1 1 1 1}
+
+test store-9 {configuration rejects wrong dialects, missing tenants and unknown options} -constraints backend -setup {::storetest::setup} -body {
+    list [catch {::tsession::sql::create wrong -connection $::storetest::db -tenant test}] \
+        [catch {::tsession::sqlite::create -connection $::storetest::db}] \
+        [catch {::tsession::sqlite::create -connection $::storetest::db -tenant test -unknown 1}] \
+        [::tpersist::db_dialect $::storetest::db]
+} -cleanup {::storetest::cleanup} -result {1 1 1 sqlite}
+cleanupTests
