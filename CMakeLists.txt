@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(tsession-sqlite VERSION 1.0.0 LANGUAGES NONE)
+project(tsession-sqlite VERSION 1.0.1 LANGUAGES NONE)
 set(PACKAGE_DIR "lib/tsession-sqlite${PROJECT_VERSION}")
 install(FILES pkgIndex.tcl readme.md LICENSE DESTINATION "${PACKAGE_DIR}")
 install(DIRECTORY library DESTINATION "${PACKAGE_DIR}")
