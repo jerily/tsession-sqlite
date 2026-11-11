@@ -1,0 +1,12 @@
+{
+  "name": "tsession-sqlite",
+  "version": "1.0.0",
+  "scripts": {},
+  "dependencies": {
+    "tcl": ">=8.6.14",
+    "tsession": "^1.1.0",
+    "tpersist": "^0.1.2",
+    "tdbcsqlite3": ">=1.1.8"
+  },
+  "devDependencies": {}
+}
